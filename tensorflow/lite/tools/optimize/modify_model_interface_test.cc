@@ -27,8 +27,6 @@ namespace tflite {
 namespace optimize {
 namespace {
 
-using ::testing::ElementsAreArray;
-
 // Create a model with 1 quant, 1 FC, 1 dequant
 std::unique_ptr<ModelT> CreateQuantizedModelSingleInputOutput(
     const TensorType& quantization_type) {
@@ -46,12 +44,18 @@ std::unique_ptr<ModelT> CreateQuantizedModelSingleInputOutput(
 
   // Op code
   quant_op_code->builtin_code = BuiltinOperator_QUANTIZE;
+  quant_op_code->deprecated_builtin_code =
+      static_cast<int8_t>(BuiltinOperator_QUANTIZE);
   quant_op_code->version = 2;
 
   fc_op_code->builtin_code = BuiltinOperator_FULLY_CONNECTED;
+  fc_op_code->deprecated_builtin_code =
+      static_cast<int8_t>(BuiltinOperator_FULLY_CONNECTED);
   fc_op_code->version = 2;
 
   dequant_op_code->builtin_code = BuiltinOperator_DEQUANTIZE;
+  dequant_op_code->deprecated_builtin_code =
+      static_cast<int8_t>(BuiltinOperator_DEQUANTIZE);
   dequant_op_code->version = 2;
 
   // Op.
@@ -137,12 +141,18 @@ std::unique_ptr<ModelT> CreateQuantizedModelMultipleInputOutput(
 
   // Op code
   quant_op_code->builtin_code = BuiltinOperator_QUANTIZE;
+  quant_op_code->deprecated_builtin_code =
+      static_cast<int8_t>(BuiltinOperator_QUANTIZE);
   quant_op_code->version = 2;
 
   fc_op_code->builtin_code = BuiltinOperator_FULLY_CONNECTED;
+  fc_op_code->deprecated_builtin_code =
+      static_cast<int8_t>(BuiltinOperator_FULLY_CONNECTED);
   fc_op_code->version = 2;
 
   dequant_op_code->builtin_code = BuiltinOperator_DEQUANTIZE;
+  dequant_op_code->deprecated_builtin_code =
+      static_cast<int8_t>(BuiltinOperator_DEQUANTIZE);
   dequant_op_code->version = 2;
 
   // Op.
@@ -258,6 +268,8 @@ std::unique_ptr<ModelT> CreateFloatModel() {
 
   // Op code
   fc_op_code->builtin_code = BuiltinOperator_FULLY_CONNECTED;
+  fc_op_code->deprecated_builtin_code =
+      static_cast<int8_t>(BuiltinOperator_FULLY_CONNECTED);
   fc_op_code->version = 2;
 
   // Op.

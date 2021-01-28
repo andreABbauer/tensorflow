@@ -193,7 +193,7 @@ class CSRSparseMatrixOpsTest(test.TestCase):
       a_rt = sparse_csr_matrix_ops.csr_sparse_matrix_to_dense(
           v, type=dtypes.float32)
     v_reassign = state_ops.assign(v, v_id).op
-    with self.assertRaisesOpError("Error while reading resource variable sm"):
+    with self.assertRaisesOpError("uninitialized"):
       self.evaluate(a_rt)
     self.evaluate(v.initializer)
     a_rt_value = self.evaluate(a_rt)
@@ -587,7 +587,7 @@ class CSRSparseMatrixOpsTest(test.TestCase):
             c_t_value, c_dense_t_value = self.evaluate((c_t, c_dense_t))
 
             self.assertAllClose(
-                c_t_value, c_dense_t_value, rtol=1e-6, atol=1e-5)
+                c_t_value, c_dense_t_value, rtol=1e-6, atol=2e-5)
 
   @test_util.run_in_graph_and_eager_modes
   def testLargeBatchSparseMatrixMatMulTransposed(self):
@@ -650,7 +650,7 @@ class CSRSparseMatrixOpsTest(test.TestCase):
             self.assertAllEqual(c_t.shape, c_dense_t.shape)
             c_t_value, c_dense_t_value = self.evaluate((c_t, c_dense_t))
             self.assertAllClose(
-                c_t_value, c_dense_t_value, rtol=1e-6, atol=1e-5)
+                c_t_value, c_dense_t_value, rtol=1e-6, atol=2e-5)
 
   @test_util.run_in_graph_and_eager_modes
   def testLargeBatchSparseMatrixMatMulConjugate(self):

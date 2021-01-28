@@ -14,102 +14,37 @@ limitations under the License.
 ==============================================================================*/
 
 #include <memory>
+#include <string>
+#include <vector>
 
-#include "absl/memory/memory.h"
-#include "absl/strings/match.h"
-#include "absl/strings/numbers.h"
-#include "pybind11/cast.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/types/variant.h"
 #include "pybind11/pybind11.h"
-#include "pybind11/pytypes.h"
-#include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/errors.h"
-#include "tensorflow/core/platform/status.h"
-#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/profiler/convert/xplane_to_tools_data.h"
-#include "tensorflow/core/profiler/convert/xplane_to_trace_events.h"
-#include "tensorflow/core/profiler/lib/profiler_session.h"
-#include "tensorflow/core/profiler/protobuf/xplane.pb.h"
-#include "tensorflow/core/profiler/rpc/client/capture_profile.h"
-#include "tensorflow/core/profiler/rpc/client/save_profile.h"
 #include "tensorflow/core/profiler/rpc/profiler_server.h"
 #include "tensorflow/python/lib/core/pybind11_status.h"
+#include "tensorflow/python/profiler/internal/profiler_pywrap_impl.h"
 
 namespace py = ::pybind11;
 
+using ::tensorflow::profiler::pywrap::ProfilerSessionWrapper;
+
 namespace {
 
-tensorflow::Status ValidateHostPortPair(const std::string& host_port) {
-  tensorflow::uint32 port;
-  std::vector<absl::string_view> parts = absl::StrSplit(host_port, ':');
-  // Must be host:port, port must be a number, host must not contain a '/',
-  // host also must not be empty.
-  if (parts.size() != 2 || !absl::SimpleAtoi(parts[1], &port) ||
-      absl::StrContains(parts[0], "/") || parts[0].empty()) {
-    return tensorflow::errors::InvalidArgument(
-        "Could not interpret \"", host_port, "\" as a host-port pair.");
-  }
-  return tensorflow::Status::OK();
-}
-
-// Takes profiler options in a py::dict and returns a ProfileOptions.
 // This must be called under GIL because it reads Python objects. Reading Python
 // objects require GIL because the objects can be mutated by other Python
 // threads. In addition, Python objects are reference counted; reading py::dict
 // will increase its reference count.
-tensorflow::ProfileOptions GetOptionsLocked(const py::dict& opts) {
-  tensorflow::ProfileOptions options =
-      tensorflow::ProfilerSession::DefaultOptions();
-  for (const auto& kw : opts) {
-    std::string key = py::cast<std::string>(kw.first);
-    if (key == "host_tracer_level") {
-      options.set_host_tracer_level(py::cast<int>(kw.second));
-      VLOG(1) << "host_tracer_level set to " << options.host_tracer_level();
-    } else if (key == "device_tracer_level") {
-      options.set_device_tracer_level(py::cast<int>(kw.second));
-      VLOG(1) << "device_tracer_level set to " << options.device_tracer_level();
-    } else if (key == "python_tracer_level") {
-      options.set_python_tracer_level(py::cast<int>(kw.second));
-      VLOG(1) << "python_tracer_level set to " << options.python_tracer_level();
+absl::flat_hash_map<std::string, absl::variant<int>> ConvertDictToMap(
+    const py::dict& dict) {
+  absl::flat_hash_map<std::string, absl::variant<int>> map;
+  for (const auto& kw : dict) {
+    if (!kw.second.is_none()) {
+      map.emplace(kw.first.cast<std::string>(), kw.second.cast<int>());
     }
   }
-  return options;
+  return map;
 }
-
-class ProfilerSessionWrapper {
- public:
-  void Start(const char* logdir, const py::dict& options) {
-    session_ = tensorflow::ProfilerSession::Create(GetOptionsLocked(options));
-    logdir_ = logdir;
-    tensorflow::MaybeRaiseRegisteredFromStatus(session_->Status());
-  }
-
-  py::bytes Stop() {
-    tensorflow::string content;
-    if (session_ != nullptr) {
-      tensorflow::profiler::XSpace xspace;
-      tensorflow::Status status = session_->CollectData(&xspace);
-      session_.reset();
-      tensorflow::profiler::ConvertXSpaceToTraceEventsString(xspace, &content);
-      tensorflow::MaybeRaiseRegisteredFromStatus(status);
-    }
-    // The content is not valid UTF-8, so it must be converted to bytes.
-    return py::bytes(content);
-  }
-
-  void ExportToTensorBoard() {
-    if (!session_ || logdir_.empty()) return;
-    tensorflow::profiler::XSpace xspace;
-    tensorflow::Status status;
-    status = session_->CollectData(&xspace);
-    session_.reset();
-    status = tensorflow::profiler::ExportToTensorBoard(xspace, logdir_);
-    tensorflow::MaybeRaiseRegisteredFromStatus(status);
-  }
-
- private:
-  std::unique_ptr<tensorflow::ProfilerSession> session_;
-  tensorflow::string logdir_;
-};
 
 }  // namespace
 
@@ -117,9 +52,41 @@ PYBIND11_MODULE(_pywrap_profiler, m) {
   py::class_<ProfilerSessionWrapper> profiler_session_class(m,
                                                             "ProfilerSession");
   profiler_session_class.def(py::init<>())
-      .def("start", &ProfilerSessionWrapper::Start)
-      .def("stop", &ProfilerSessionWrapper::Stop)
-      .def("export_to_tb", &ProfilerSessionWrapper::ExportToTensorBoard);
+      .def("start",
+           [](ProfilerSessionWrapper& wrapper, const char* logdir,
+              const py::dict& options) {
+             tensorflow::Status status;
+             absl::flat_hash_map<std::string, absl::variant<int>> opts =
+                 ConvertDictToMap(options);
+             {
+               py::gil_scoped_release release;
+               status = wrapper.Start(logdir, opts);
+             }
+             // Py_INCREF and Py_DECREF must be called holding the GIL.
+             tensorflow::MaybeRaiseRegisteredFromStatus(status);
+           })
+      .def("stop",
+           [](ProfilerSessionWrapper& wrapper) {
+             tensorflow::string content;
+             tensorflow::Status status;
+             {
+               py::gil_scoped_release release;
+               status = wrapper.Stop(&content);
+             }
+             // Py_INCREF and Py_DECREF must be called holding the GIL.
+             tensorflow::MaybeRaiseRegisteredFromStatus(status);
+             // The content is not valid UTF-8. It must be converted to bytes.
+             return py::bytes(content);
+           })
+      .def("export_to_tb", [](ProfilerSessionWrapper& wrapper) {
+        tensorflow::Status status;
+        {
+          py::gil_scoped_release release;
+          status = wrapper.ExportToTensorBoard();
+        }
+        // Py_INCREF and Py_DECREF must be called holding the GIL.
+        tensorflow::MaybeRaiseRegisteredFromStatus(status);
+      });
 
   m.def("start_server", [](int port) {
     auto profiler_server =
@@ -134,36 +101,30 @@ PYBIND11_MODULE(_pywrap_profiler, m) {
         [](const char* service_addr, const char* logdir,
            const char* worker_list, bool include_dataset_ops, int duration_ms,
            int num_tracing_attempts, py::dict options) {
-          // Normalize py::dict into a well defined proto.
-          tensorflow::ProfileOptions opts = GetOptionsLocked(options);
-
-          tensorflow::Status status = ValidateHostPortPair(service_addr);
-          tensorflow::MaybeRaiseRegisteredFromStatus(status);
-          opts.set_include_dataset_ops(include_dataset_ops);
+          tensorflow::Status status;
+          absl::flat_hash_map<std::string, absl::variant<int>> opts =
+              ConvertDictToMap(options);
           {
-            // Release the lock to keep the lock scope to a minimum, and allow
-            // other threads to proceed.
             py::gil_scoped_release release;
-            status = tensorflow::profiler::Trace(service_addr, logdir,
-                                                 worker_list, duration_ms,
-                                                 num_tracing_attempts, opts);
+            status = tensorflow::profiler::pywrap::Trace(
+                service_addr, logdir, worker_list, include_dataset_ops,
+                duration_ms, num_tracing_attempts, opts);
           }
+          // Py_INCREF and Py_DECREF must be called holding the GIL.
           tensorflow::MaybeRaiseRegisteredFromStatus(status);
         });
 
   m.def("monitor", [](const char* service_addr, int duration_ms,
                       int monitoring_level, bool display_timestamp) {
-    tensorflow::Status status = ValidateHostPortPair(service_addr);
-    tensorflow::MaybeRaiseRegisteredFromStatus(status);
     tensorflow::string content;
+    tensorflow::Status status;
     {
-      // Release the lock to keep the lock scope to a minimum, and allow
-      // other threads to proceed.
       py::gil_scoped_release release;
-      status = tensorflow::profiler::Monitor(service_addr, duration_ms,
-                                             monitoring_level,
-                                             display_timestamp, &content);
+      status = tensorflow::profiler::pywrap::Monitor(
+          service_addr, duration_ms, monitoring_level, display_timestamp,
+          &content);
     }
+    // Py_INCREF and Py_DECREF must be called holding the GIL.
     tensorflow::MaybeRaiseRegisteredFromStatus(status);
     return content;
   });

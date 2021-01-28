@@ -340,6 +340,9 @@ def random_uniform(minval, maxval, dims, name=None):
 
 recv = gen_xla_ops.xla_recv
 reduce = gen_xla_ops.xla_reduce
+variadic_reduce = gen_xla_ops.xla_variadic_reduce
+
+ops.no_gradient("XlaVariadicReduce")
 
 
 def reduce_window(operand,
@@ -398,6 +401,21 @@ replica_id = gen_xla_ops.xla_replica_id
 set_bound = gen_xla_ops.xla_set_bound
 
 
+# Make a static dimension into a xla bounded dynamic dimension. The current
+# static dimension size will become the bound and the second operand becomes the
+# dynamic size of the dimension.
+#
+# This should mostly be used for testing.
+#
+# def f():
+#   array = tf.convert_to_tensor([[1, 2, 3, 4, 5]])
+#   # Tells xla the valid size of the array is 3.
+#   dim = 0
+#   p = xla_set_dynamic_dimension_size(array, dim, 3)
+#   assert(reduce_sum(p) == 6) # xla knows only the first 3 elements are valid.
+set_dynamic_dimension_size = gen_xla_ops.xla_set_dynamic_dimension_size
+
+
 def reshape(x, new_sizes, dimensions=None, name=None):
   if dimensions is not None:
     x = array_ops.transpose(x, dimensions)
@@ -426,10 +444,11 @@ sharding = gen_xla_ops.xla_sharding
 
 @ops.RegisterGradient("XlaSharding")
 def _sharding_grad(op, grad):
-  grad_sharding = gen_xla_ops.xla_sharding(grad)
+  sharding_attr = op.get_attr("sharding")
+  grad_sharding = gen_xla_ops.xla_sharding(grad, sharding=sharding_attr)
   # pylint: disable=protected-access
-  grad_sharding.op._set_attr(
-      "_XlaSharding", attr_value_pb2.AttrValue(s=op.get_attr("_XlaSharding")))
+  grad_sharding.op._set_attr("_XlaSharding",
+                             attr_value_pb2.AttrValue(s=sharding_attr))
   return [grad_sharding]
 
 
@@ -455,6 +474,7 @@ def _spmd_shard_to_full_shape_grad(op, grad):
 
 sort = gen_xla_ops.xla_sort
 key_value_sort = gen_xla_ops.xla_key_value_sort
+variadic_sort = gen_xla_ops.xla_variadic_sort
 while_loop = gen_xla_ops.xla_while
 dequantize = gen_xla_ops.xla_dequantize
 

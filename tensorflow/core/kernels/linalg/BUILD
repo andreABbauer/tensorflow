@@ -34,6 +34,7 @@ package_group(
 
 # Export a few files for use on Android.
 exports_files([
+    "cholesky_op.cc",
     "einsum_op_impl_half.cc",
     "einsum_op_impl_bfloat16.cc",
     "einsum_op_impl_int32.cc",
@@ -51,6 +52,9 @@ exports_files([
     "matrix_inverse_op.cc",
     "matrix_set_diag_op.h",
     "matrix_set_diag_op.cc",
+    "matrix_triangular_solve_op_complex.cc",
+    "matrix_triangular_solve_op_impl.h",
+    "matrix_triangular_solve_op_real.cc",
 ])
 
 # Public support libraries ----------------------------------------------------
@@ -212,7 +216,7 @@ tf_kernel_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core/kernels:fill_functor",
-        "//tensorflow/core:stream_executor",
+        "//tensorflow/core/platform:stream_executor",
     ] + if_cuda([
         "//tensorflow/core/platform/default/build_config:cublas_plugin",
         "//tensorflow/core/util:cuda_solvers",

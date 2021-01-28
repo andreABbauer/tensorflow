@@ -19,7 +19,6 @@ limitations under the License.
 #include "tensorflow/lite/micro/kernels/kernel_runner.h"
 #include "tensorflow/lite/micro/test_helpers.h"
 #include "tensorflow/lite/micro/testing/micro_test.h"
-#include "tensorflow/lite/micro/testing/test_utils.h"
 
 namespace tflite {
 namespace testing {
@@ -33,7 +32,7 @@ constexpr float kOutputMax = 127.0 / 128.0;
 
 TfLiteTensor CreateL2NormTensor(const float* data, TfLiteIntArray* dims,
                                 bool is_input) {
-  return CreateFloatTensor(data, dims);
+  return CreateTensor(data, dims);
 }
 
 template <typename T>

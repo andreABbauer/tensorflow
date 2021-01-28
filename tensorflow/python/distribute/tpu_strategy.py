@@ -22,9 +22,10 @@ import atexit
 import collections
 import contextlib
 import copy
+import functools
 import weakref
-from absl import logging
 
+from absl import logging
 import numpy as np
 
 from tensorflow.compiler.xla.experimental.xla_sharding import xla_sharding
@@ -62,6 +63,7 @@ from tensorflow.python.tpu import training_loop
 from tensorflow.python.tpu.ops import tpu_ops
 from tensorflow.python.util import deprecation
 from tensorflow.python.util import nest
+from tensorflow.python.util import tf_inspect
 from tensorflow.python.util.tf_export import tf_export
 
 _XLA_OP_BY_OP_INPUTS_LIMIT = 200
@@ -99,6 +101,122 @@ def validate_run_function(fn):
         "`strategy.run` is a `tf.function` or "
         "`strategy.run` is called inside a `tf.function` if "
         "eager behavior is enabled.")
+
+
+def _maybe_partial_apply_variables(fn, args, kwargs):
+  """Inspects arguments to partially apply any DistributedVariable.
+
+  This avoids an automatic cast of the current variable value to tensor.
+
+  Note that a variable may be captured implicitly with Python scope instead of
+  passing it to run(), but supporting run() keeps behavior consistent
+  with MirroredStrategy.
+
+  Since positional arguments must be applied from left to right, this function
+  does some tricky function inspection to move variable positional arguments
+  into kwargs. As a result of this, we can't support passing Variables as *args,
+  nor as args to functions which combine both explicit positional arguments and
+  *args.
+
+  Args:
+    fn: The function to run, as passed to run().
+    args: Positional arguments to fn, as passed to run().
+    kwargs: Keyword arguments to fn, as passed to run().
+
+  Returns:
+    A tuple of the function (possibly wrapped), args, kwargs (both
+    possibly filtered, with members of args possibly moved to kwargs).
+    If no variables are found, this function is a noop.
+
+  Raises:
+    ValueError: If the function signature makes unsupported use of *args, or if
+      too many arguments are passed.
+  """
+
+  def is_distributed_var(x):
+    flat = nest.flatten(x)
+    return flat and isinstance(flat[0], values.DistributedVariable)
+
+  # We will split kwargs into two dicts, one of which will be applied now.
+  var_kwargs = {}
+  nonvar_kwargs = {}
+
+  if kwargs:
+    var_kwargs = {k: v for k, v in kwargs.items() if is_distributed_var(v)}
+  if var_kwargs:
+    nonvar_kwargs = {
+        k: v for k, v in kwargs.items() if not is_distributed_var(v)
+    }
+
+  # Dump the argument names of `fn` to a list. This will include both positional
+  # and keyword arguments, but since positional arguments come first we can
+  # look up names of positional arguments by index.
+  positional_args = []
+  index_of_star_args = None
+  for i, p in enumerate(tf_inspect.signature(fn).parameters.values()):
+    # Class methods define "self" as first argument, but we don't pass "self".
+    # Note that this is a heuristic, as a method can name its first argument
+    # something else, and a function can define a first argument "self" as well.
+    # In both of these cases, using a Variable will fail with an unfortunate
+    # error about the number of arguments.
+    # inspect.is_method() seems not to work here, possibly due to the use of
+    # tf.function().
+    if i == 0 and p.name == "self":
+      continue
+
+    if p.kind == tf_inspect.Parameter.POSITIONAL_OR_KEYWORD:
+      positional_args.append(p.name)
+
+    elif p.kind == tf_inspect.Parameter.VAR_POSITIONAL:
+      # We'll raise an error later if a variable is passed to *args, since we
+      # can neither pass it by name nor partially apply it. This case only
+      # happens once at most.
+      index_of_star_args = i
+
+    elif p.kind == tf_inspect.Parameter.POSITIONAL_ONLY:
+      # This is a rare Python feature, indicating a / in the arg list.
+      if var_kwargs or any(is_distributed_var(a) for a in args):
+        raise ValueError(
+            "Mixing Variables and positional-only parameters not supported by "
+            "TPUStrategy.")
+      return fn, args, kwargs
+
+  star_args = []
+  have_seen_var_arg = False
+
+  for i, a in enumerate(args):
+    if is_distributed_var(a):
+      if index_of_star_args is not None and i >= index_of_star_args:
+        raise ValueError(
+            "TPUStrategy.run() cannot handle Variables passed to *args. "
+            "Either name the function argument, or capture the Variable "
+            "implicitly.")
+      if len(positional_args) <= i:
+        raise ValueError(
+            "Too many positional arguments passed to call to TPUStrategy.run()."
+        )
+      var_kwargs[positional_args[i]] = a
+      have_seen_var_arg = True
+    else:
+      if index_of_star_args is not None and i >= index_of_star_args:
+        if have_seen_var_arg:
+          raise ValueError(
+              "TPUStrategy.run() cannot handle both Variables and a mix of "
+              "positional args and *args. Either remove the *args, or capture "
+              "the Variable implicitly.")
+        else:
+          star_args.append(a)
+          continue
+
+      if len(positional_args) <= i:
+        raise ValueError(
+            "Too many positional arguments passed to call to TPUStrategy.run()."
+        )
+      nonvar_kwargs[positional_args[i]] = a
+
+  if var_kwargs:
+    return functools.partial(fn, **var_kwargs), star_args, nonvar_kwargs
+  return fn, args, kwargs
 
 
 @tf_export("distribute.TPUStrategy", v1=[])
@@ -272,6 +390,8 @@ class TPUStrategyV2(distribute_lib.Strategy):
     """
     validate_run_function(fn)
 
+    fn, args, kwargs = _maybe_partial_apply_variables(fn, args, kwargs)
+
     # Note: the target function is converted to graph even when in Eager mode,
     # so autograph is on by default here.
     fn = autograph.tf_convert(fn, autograph_ctx.control_status_ctx())
@@ -338,8 +458,8 @@ class TPUStrategyV2(distribute_lib.Strategy):
     """Adds annotation that `tensor` will be split across logical devices.
 
     This adds an annotation to tensor `tensor` specifying that operations on
-    `tensor` will be be split among multiple logical devices. Tensor `tensor`
-    will be split across dimensions specified by `partition_dimensions`.
+    `tensor` will be split among multiple logical devices. Tensor `tensor` will
+    be split across dimensions specified by `partition_dimensions`.
     The dimensions of `tensor` must be divisible by corresponding value in
     `partition_dimensions`.
 
@@ -533,6 +653,8 @@ class TPUStrategy(distribute_lib.Strategy):
     """See base class."""
     validate_run_function(fn)
 
+    fn, args, kwargs = _maybe_partial_apply_variables(fn, args, kwargs)
+
     # Note: the target function is converted to graph even when in Eager mode,
     # so autograph is on by default here.
     fn = autograph.tf_convert(fn, autograph_ctx.control_status_ctx())
@@ -647,6 +769,8 @@ class TPUStrategyV1(distribute_lib.StrategyV1):
     """
     validate_run_function(fn)
 
+    fn, args, kwargs = _maybe_partial_apply_variables(fn, args, kwargs)
+
     fn = autograph.tf_convert(fn, autograph_ctx.control_status_ctx())
     options = options or distribute_lib.RunOptions()
     return self.extended.tpu_run(fn, args, kwargs, options)
@@ -739,7 +863,10 @@ class TPUExtended(distribute_lib.StrategyExtendedV1):
       atexit.register(async_wait)
 
     # Flag to turn on VariablePolicy
-    self._use_var_policy = False
+    self._use_var_policy = True
+
+    # Flag to enable TF2 SPMD
+    self._use_spmd_for_xla_partitioning = False
 
   def _validate_colocate_with_variable(self, colocate_with_variable):
     distribute_utils. validate_colocate(colocate_with_variable, self)
@@ -796,12 +923,19 @@ class TPUExtended(distribute_lib.StrategyExtendedV1):
         raise ValueError(
             "Found tensor {} with spec {}. TPUStrategy does not support "
             "distributed datasets with device prefetch when using sparse or "
-            "ragged tensors. If you indend to use sparse or ragged tensors, "
+            "ragged tensors. If you intend to use sparse or ragged tensors, "
             "please pass a tf.distribute.InputOptions object with "
             "experimental_prefetch_to_device set to False to your dataset "
             "distribution function.".format(path, type(spec)))
 
   def _experimental_distribute_dataset(self, dataset, options):
+    if (options and options.experimental_replication_mode ==
+        distribute_lib.InputReplicationMode.PER_REPLICA):
+      raise NotImplementedError(
+          "InputReplicationMode.PER_REPLICA "
+          "is only supported in "
+          "`experimental_distribute_datasets_from_function`."
+      )
     if options is None or options.experimental_prefetch_to_device:
       self._check_spec(dataset.element_spec)
 
@@ -812,6 +946,13 @@ class TPUExtended(distribute_lib.StrategyExtendedV1):
         num_replicas_in_sync=self._num_replicas_in_sync)
 
   def _distribute_datasets_from_function(self, dataset_fn, options):
+    if (options and options.experimental_replication_mode ==
+        distribute_lib.InputReplicationMode.PER_REPLICA):
+      raise NotImplementedError(
+          "InputReplicationMode.PER_REPLICA "
+          "is only supported in "
+          " `experimental_distribute_datasets_from_function` "
+          "of tf.distribute.MirroredStrategy")
     input_workers = self._get_input_workers(options)
     input_contexts = []
     num_workers = input_workers.num_workers
@@ -886,8 +1027,8 @@ class TPUExtended(distribute_lib.StrategyExtendedV1):
           run_fn,
           replicate_inputs,
           device_assignment=self._device_assignment,
-          xla_options=tpu.XLAOptions(use_spmd_for_xla_partitioning=False))
-
+          xla_options=tpu.XLAOptions(use_spmd_for_xla_partitioning=self
+                                     ._use_spmd_for_xla_partitioning))
       # If run_fn has tensor outputs, tpu.replicate returns a list of list. We
       # will flatten it in this case. If run_fn has no tensor outputs,
       # tpu.replicate returns a list of no_ops, we will keep the output as it
@@ -1021,9 +1162,56 @@ class TPUExtended(distribute_lib.StrategyExtendedV1):
         distribute_utils.TPU_VARIABLE_CLASS_MAPPING,
         distribute_utils.TPU_VARIABLE_POLICY_MAPPING, **kwargs)
 
-  def _reduce_to(self, reduce_op, value, destinations, experimental_hints):
+  def _gather_to_implementation(self, value, destinations, axis, options):
+    if not isinstance(value, values.DistributedValues):
+      return value
+
+    value_list = value.values
+    # pylint: disable=protected-access
+    if isinstance(
+        value,
+        values.DistributedVariable) and value._packed_variable is not None:
+      value_list = tuple(
+          value._packed_variable.on_device(d)
+          for d in value._packed_variable.devices)
+    # pylint: enable=protected-access
+
+    # Currently XLA op by op mode has a limit for the number of inputs for a
+    # single op, thus we break one `add_n` op into a group of `add_n` ops to
+    # work around the constraint.
+    if len(value.values) <= _XLA_OP_BY_OP_INPUTS_LIMIT:
+      output = array_ops.concat(value_list, axis=axis)
+    else:
+      output = array_ops.concat(
+          value_list[:_XLA_OP_BY_OP_INPUTS_LIMIT], axis=axis)
+      for i in range(_XLA_OP_BY_OP_INPUTS_LIMIT, len(value_list),
+                     _XLA_OP_BY_OP_INPUTS_LIMIT - 1):
+        output = array_ops.concat(
+            [output] + value_list[i:i + _XLA_OP_BY_OP_INPUTS_LIMIT - 1],
+            axis=axis)
+
+    output = self._broadcast_output(destinations, output)
+    return output
+
+  def _broadcast_output(self, destinations, output):
+    devices = cross_device_ops_lib.get_devices_from(destinations)
+
+    if len(devices) == 1:
+      # If necessary, copy to requested destination.
+      dest_canonical = device_util.canonicalize(devices[0])
+      host_canonical = device_util.canonicalize(self._host_device)
+
+      if dest_canonical != host_canonical:
+        with ops.device(dest_canonical):
+          output = array_ops.identity(output)
+    else:
+      output = cross_device_ops_lib.simple_broadcast(output, destinations)
+
+    return output
+
+  def _reduce_to(self, reduce_op, value, destinations, options):
     if (isinstance(value, values.DistributedValues) or
-        tensor_util.is_tensor(value)
+        tensor_util.is_tf_type(value)
        ) and tpu_values.enclosing_tpu_context() is not None:
       if reduce_op == reduce_util.ReduceOp.MEAN:
         # TODO(jhseu):  Revisit once we support model-parallelism.
@@ -1065,19 +1253,7 @@ class TPUExtended(distribute_lib.StrategyExtendedV1):
     if reduce_op == reduce_util.ReduceOp.MEAN:
       output *= (1. / len(value_list))
 
-    devices = cross_device_ops_lib.get_devices_from(destinations)
-
-    if len(devices) == 1:
-      # If necessary, copy to requested destination.
-      dest_canonical = device_util.canonicalize(devices[0])
-      host_canonical = device_util.canonicalize(self._host_device)
-
-      if dest_canonical != host_canonical:
-        with ops.device(dest_canonical):
-          output = array_ops.identity(output)
-    else:
-      output = cross_device_ops_lib.simple_broadcast(output, destinations)
-
+    output = self._broadcast_output(destinations, output)
     return output
 
   def _update(self, var, fn, args, kwargs, group):
@@ -1289,7 +1465,7 @@ class TPUExtended(distribute_lib.StrategyExtendedV1):
         maximum_shapes = []
         flattened_list = nest.flatten(replicate_inputs[0])
         for input_tensor in flattened_list:
-          if tensor_util.is_tensor(input_tensor):
+          if tensor_util.is_tf_type(input_tensor):
             rank = input_tensor.shape.rank
           else:
             rank = np.ndim(input_tensor)
@@ -1312,7 +1488,8 @@ class TPUExtended(distribute_lib.StrategyExtendedV1):
             device_assignment=self._device_assignment,
             maximum_shapes=maximum_shapes,
             padding_spec=padding_spec,
-            xla_options=tpu.XLAOptions(use_spmd_for_xla_partitioning=False))
+            xla_options=tpu.XLAOptions(use_spmd_for_xla_partitioning=self
+                                       ._use_spmd_for_xla_partitioning))
 
       # Remove all no ops that may have been added during 'tpu.replicate()'
       if isinstance(result[0], list):
@@ -1345,6 +1522,9 @@ class TPUExtended(distribute_lib.StrategyExtendedV1):
     # TPUStrategy.
     return False
 
+  def _get_local_replica_id(self, replica_id_in_sync_group):
+    return replica_id_in_sync_group
+
 
 class _TPUReplicaContext(distribute_lib.ReplicaContext):
   """Replication Context class for TPU Strategy."""
@@ -1370,6 +1550,65 @@ class _TPUReplicaContext(distribute_lib.ReplicaContext):
   def experimental_logical_device(self, logical_device_id):
     """Places variables and ops on the specified logical device."""
     return self.strategy.extended.experimental_logical_device(logical_device_id)
+
+  # TODO(wxinyi): Investigate whether to use cross_replica_sum to optimize it.
+  def all_gather(self, value, axis, experimental_hints=None):
+    del experimental_hints
+    for v in nest.flatten(value):
+      if isinstance(v, ops.IndexedSlices):
+        raise NotImplementedError("all_gather does not support IndexedSlices")
+
+    def _all_to_all(value, axis):
+      # The underlying AllToAllOp first do a split of the input value and then
+      # cross-replica communication and concatenation of the result. So we
+      # concatenate the local tensor here first.
+      inputs = array_ops.concat(
+          [value for _ in range(self.num_replicas_in_sync)], axis=0)
+      unordered_output = tpu_ops.all_to_all(
+          inputs,
+          concat_dimension=axis,
+          split_dimension=0,
+          split_count=self.num_replicas_in_sync)
+
+      # Re-order since xla.replica_id and ReplicaContext.replica_id mismatch.
+      # xla_id = xla.replica_id()
+      concat_replica_id = array_ops.concat([
+          array_ops.expand_dims_v2(self.replica_id_in_sync_group, 0)
+          for _ in range(self.num_replicas_in_sync)
+      ],
+                                           axis=0)
+      replica_ids = tpu_ops.all_to_all(
+          concat_replica_id,
+          concat_dimension=0,
+          split_dimension=0,
+          split_count=self.num_replicas_in_sync)
+
+      splited_unordered = array_ops.split(
+          unordered_output,
+          num_or_size_splits=self.num_replicas_in_sync,
+          axis=axis)
+      sorted_with_extra_dim = math_ops.unsorted_segment_sum(
+          array_ops.concat([
+              array_ops.expand_dims(replica, axis=0)
+              for replica in splited_unordered
+          ],
+                           axis=0),
+          replica_ids,
+          num_segments=self.num_replicas_in_sync)
+
+      splited_with_extra_dim = array_ops.split(
+          sorted_with_extra_dim,
+          num_or_size_splits=self.num_replicas_in_sync,
+          axis=0)
+      squeezed = [
+          array_ops.squeeze(replica, axis=0)
+          for replica in splited_with_extra_dim
+      ]
+      result = array_ops.concat(squeezed, axis=axis)
+      return result
+
+    ys = [_all_to_all(t, axis=axis) for t in nest.flatten(value)]
+    return nest.pack_sequence_as(value, ys)
 
 
 def _set_last_step_outputs(ctx, last_step_tensor_outputs):

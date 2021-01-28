@@ -14,8 +14,16 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/util.h"
 
+#include <stddef.h>
+#include <stdint.h>
+
+#include <algorithm>
 #include <complex>
 #include <cstring>
+#include <initializer_list>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "tensorflow/lite/builtin_ops.h"
 #include "tensorflow/lite/c/common.h"
@@ -95,6 +103,9 @@ TfLiteStatus GetSizeOfType(TfLiteContext* context, const TfLiteType type,
       break;
     case kTfLiteInt64:
       *bytes = sizeof(int64_t);
+      break;
+    case kTfLiteUInt64:
+      *bytes = sizeof(uint64_t);
       break;
     case kTfLiteBool:
       *bytes = sizeof(bool);

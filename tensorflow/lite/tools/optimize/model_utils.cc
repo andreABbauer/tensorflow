@@ -14,12 +14,14 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/tools/optimize/model_utils.h"
 
+#include <fstream>
 #include <memory>
 
 #include "absl/memory/memory.h"
 #include "tensorflow/lite/kernels/internal/tensor_utils.h"
 #include "tensorflow/lite/kernels/internal/types.h"
 #include "tensorflow/lite/model.h"
+#include "tensorflow/lite/schema/schema_conversion_utils.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/schema/schema_utils.h"
 #include "tensorflow/lite/tools/optimize/operator_property.h"
@@ -42,6 +44,8 @@ int32_t GetOrInsertOpCodeIndex(ModelT* model, const BuiltinOperator& op_code,
   model->operator_codes.push_back(absl::make_unique<OperatorCodeT>());
   int op_code_idx = model->operator_codes.size() - 1;
   model->operator_codes[op_code_idx]->builtin_code = op_code;
+  model->operator_codes[op_code_idx]->deprecated_builtin_code =
+      ConvertBuiltinCodeToDeprecatedBuiltinCode(op_code);
   // Version 2 and onwards supports INT8 inputs.
   model->operator_codes[op_code_idx]->version = version;
 
@@ -143,6 +147,34 @@ void SetOperatorCodeVersion(ModelT* model) {
       }
     }
   }
+}
+
+void WriteFile(const std::string& out_file, const uint8_t* bytes,
+               size_t num_bytes) {
+  std::fstream stream(out_file, std::ios::binary | std::ios::out);
+  for (size_t i = 0; i < num_bytes; i++) {
+    stream << bytes[i];
+  }
+  TFLITE_DCHECK(!stream.bad() && !stream.fail());
+}
+
+std::unique_ptr<flatbuffers::FlatBufferBuilder> FinishModel(
+    const tflite::ModelT* model) {
+  std::unique_ptr<flatbuffers::FlatBufferBuilder> builder(
+      new flatbuffers::FlatBufferBuilder());
+  auto packed_model = tflite::Model::Pack(*builder, model);
+  tflite::FinishModelBuffer(*builder, packed_model);
+  return builder;
+}
+
+std::unique_ptr<tflite::ModelT> CreateMutableModelFromFile(
+    const string& model_filepath) {
+  auto fb_model =
+      tflite::FlatBufferModel::BuildFromFile(model_filepath.c_str());
+  auto tflite_model = fb_model->GetModel();
+  auto copied_model = absl::make_unique<tflite::ModelT>();
+  tflite_model->UnPackTo(copied_model.get(), nullptr);
+  return copied_model;
 }
 
 }  // namespace utils

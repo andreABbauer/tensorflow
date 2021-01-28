@@ -39,7 +39,6 @@ from tensorflow.python.keras.optimizer_v2 import adam
 from tensorflow.python.module import module
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import init_ops
-from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import state_ops
 from tensorflow.python.ops import template
 from tensorflow.python.ops import variable_scope
@@ -90,7 +89,7 @@ class InterfaceTests(test.TestCase):
 
   def testSaveWithOnlyKerasSession(self):
 
-    with ops.Graph().as_default():
+    with ops.Graph().as_default(), self.cached_session():
       inp = input_layer.Input([1])
       dense = core.Dense(1)(inp)
       model = training.Model(inp, dense)
@@ -98,24 +97,6 @@ class InterfaceTests(test.TestCase):
       model.fit([1.], [2.])
       checkpoint = trackable_utils.Checkpoint(model=model)
       checkpoint.save(os.path.join(self.get_temp_dir(), "ckpt"))
-
-  def testObjectMetadata(self):
-    if not context.executing_eagerly():
-      self.skipTest("Run in eager mode only.")
-
-    checkpoint_directory = self.get_temp_dir()
-    checkpoint_prefix = os.path.join(checkpoint_directory, "ckpt")
-    dense = core.Dense(1)
-    checkpoint = trackable_utils.Checkpoint(dense=dense)
-    dense(constant_op.constant([[1.]]))
-    save_path = checkpoint.save(checkpoint_prefix)
-
-    objects = trackable_utils.object_metadata(save_path)
-    all_variable_names = []
-    for obj in objects.nodes:
-      for attribute in obj.attributes:
-        all_variable_names.append(attribute.full_name)
-    self.assertIn("dense/kernel", all_variable_names)
 
 
 class CheckpointingTests(keras_parameterized.TestCase):
@@ -273,7 +254,7 @@ class CheckpointingTests(keras_parameterized.TestCase):
       # Optimizer slot variables are created when the original variable is
       # restored.
       self.assertAllEqual([1.5], self.evaluate(on_create_m_bias_slot))
-      dummy_var = resource_variable_ops.ResourceVariable([1.])
+      dummy_var = variables_lib.Variable([1.])
       on_create_optimizer.minimize(loss=dummy_var.read_value,
                                    var_list=[dummy_var])
       status.assert_existing_objects_matched()
@@ -356,6 +337,7 @@ class CheckpointingTests(keras_parameterized.TestCase):
     with self.test_session():
       num_training_steps = 10
       checkpoint_directory = self.get_temp_dir()
+      optimizer = adam.Adam(0.001)
       def _train_fn(model, input_value):
         with backprop.GradientTape() as tape:
           loss = model(input_value)
@@ -365,7 +347,6 @@ class CheckpointingTests(keras_parameterized.TestCase):
       for training_continuation in range(3):
         with testing_utils.device(should_use_gpu=True):
           model = MyModel()
-          optimizer = adam.Adam(0.001)
           root = trackable_utils.Checkpoint(
               optimizer=optimizer, model=model)
           manager = checkpoint_management.CheckpointManager(
@@ -459,8 +440,8 @@ class CheckpointingTests(keras_parameterized.TestCase):
 
       def __init__(self):
         super(Model, self).__init__()
-        self.w = resource_variable_ops.ResourceVariable(0.0)
-        self.b = resource_variable_ops.ResourceVariable(0.0)
+        self.w = variables_lib.Variable(0.0)
+        self.b = variables_lib.Variable(0.0)
         self.vars = [self.w, self.b]
 
       def call(self, x):
@@ -874,8 +855,7 @@ class CheckpointCompatibilityTests(keras_parameterized.TestCase):
         self._check_sentinels(root)
         # Check that there is no error when keys are missing from the name-based
         # checkpoint.
-        root.not_in_name_checkpoint = resource_variable_ops.ResourceVariable(
-            [1.])
+        root.not_in_name_checkpoint = variables_lib.Variable([1.])
         status = object_saver.restore(save_path)
         with self.assertRaises(AssertionError):
           status.assert_existing_objects_matched()

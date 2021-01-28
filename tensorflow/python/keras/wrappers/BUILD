@@ -20,7 +20,7 @@ py_library(
         "__init__.py",
         "scikit_learn.py",
     ],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     deps = [
         "//tensorflow/python:util",
         "//tensorflow/python/keras:engine",
@@ -39,6 +39,8 @@ tf_py_test(
     deps = [
         ":wrappers",
         "//tensorflow/python:client_testlib",
+        "//tensorflow/python/keras:testing_utils",
+        "//tensorflow/python/keras/utils:np_utils",
         "//third_party/py/numpy",
     ],
 )

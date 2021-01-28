@@ -1,4 +1,4 @@
-/* Copyright 2018 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,10 @@ limitations under the License.
 #include "tensorflow/lite/micro/micro_op_resolver.h"
 #include "tensorflow/lite/portable_type_to_tflitetype.h"
 #include "tensorflow/lite/schema/schema_generated.h"
+
+// Copied from tensorflow/lite/version.h to avoid a dependency chain into
+// tensorflow/core.
+#define TFLITE_SCHEMA_VERSION (3)
 
 namespace tflite {
 
@@ -177,11 +181,6 @@ class MicroInterpreter {
   // error reporting during initialization.
   void Init(tflite::Profiler* profiler);
 
-  void CorrectTensorEndianness(TfLiteEvalTensor* tensorCorr);
-
-  template <class T>
-  void CorrectTensorDataEndianness(T* data, int32_t size);
-
   NodeAndRegistration* node_and_registrations_ = nullptr;
 
   const Model* model_;
@@ -200,8 +199,8 @@ class MicroInterpreter {
   // TODO(b/16157777): Drop this reference:
   internal::ContextHelper context_helper_;
 
-  // TODO(b/160894903): Clean these pointers up when all APIs are updated to new
-  // TfLiteEvalTensor buffers.
+  // TODO(b/162311891): Clean these pointers up when this class supports buffers
+  // from TfLiteEvalTensor.
   TfLiteTensor* input_tensor_;
   TfLiteTensor* output_tensor_;
 };

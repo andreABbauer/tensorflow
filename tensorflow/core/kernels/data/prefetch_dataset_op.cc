@@ -18,6 +18,7 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/metrics.h"
 #include "tensorflow/core/framework/dataset.h"
+#include "tensorflow/core/framework/model.h"
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 #include "tensorflow/core/framework/stats_aggregator.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -47,6 +48,8 @@ namespace data {
 /* static */ constexpr const char* const PrefetchDatasetOp::kLegacyAutotune;
 /* static */ constexpr const char* const PrefetchDatasetOp::kBufferSizeMin;
 
+namespace {
+
 // Determines the fraction of slack time by which to delay prefetching of data.
 constexpr double kSleepFactor = 0.2;
 constexpr char kBuffer[] = "buffer";
@@ -54,6 +57,8 @@ constexpr char kStatus[] = "status";
 constexpr char kSizeSuffix[] = ".size";
 constexpr char kCodeSuffix[] = ".code";
 constexpr char kErrorMessageSuffix[] = ".error_message";
+
+}  // namespace
 
 class PrefetchDatasetOp::Dataset : public DatasetBase {
  public:
@@ -133,8 +138,12 @@ class PrefetchDatasetOp::Dataset : public DatasetBase {
           buffer_size_min_(params.dataset->buffer_size_min_),
           auto_tuner_(params.dataset->buffer_size_, buffer_size_min_),
           legacy_autotune_(params.dataset->legacy_autotune_),
+          // If `legacy_autotune_`, initialize the `buffer_size_` value to be 0
+          // to avoid the created node to be collected as tunable nodes in the
+          // autotuning optimization.
           buffer_size_(std::make_shared<model::SharedState>(
-              params.dataset->buffer_size_, mu_, cond_var_)) {
+              legacy_autotune_ ? 0 : params.dataset->buffer_size_, mu_,
+              cond_var_)) {
       slack_us_ = 0;
     }
 
@@ -289,17 +298,34 @@ class PrefetchDatasetOp::Dataset : public DatasetBase {
     }
 
     data::TraceMeMetadata GetTraceMeMetadata() const override {
-      int64 limit = -1;
+      int64 limit = -1, size = -1;
+      data::TraceMeMetadata result;
       // NOTE: We only set the parallelism value if the lock can be acquired
       // right away to avoid introducing tracing overhead.
       if (mu_->try_lock()) {
         limit = buffer_limit();
+        size = buffer_.size();
+        if (!buffer_.empty()) {
+          std::vector<std::string> shapes(buffer_.front().value.size());
+          for (const auto& component : buffer_.front().value) {
+            shapes.push_back(component.shape().DebugString());
+          }
+          result.push_back(std::make_pair("next_element_shapes",
+                                          absl::StrJoin(shapes, ",")));
+        }
         mu_->unlock();
       }
-      data::TraceMeMetadata result;
       result.push_back(std::make_pair(
           "buffer_limit",
           strings::Printf("%lld", static_cast<long long>(limit))));
+      result.push_back(std::make_pair(
+          "buffer_size",
+          strings::Printf("%lld", static_cast<long long>(size))));
+      result.push_back(std::make_pair(
+          "autotune",
+          dataset()->buffer_size_ == model::kAutotune ? "true" : "false"));
+      result.push_back(std::make_pair(
+          "autotune_mode", legacy_autotune_ ? "legacy" : "performance"));
       if (dataset()->slack_period_ > 0) {
         result.push_back(std::make_pair(
             "slack",
@@ -312,12 +338,14 @@ class PrefetchDatasetOp::Dataset : public DatasetBase {
     // A buffer element comprises a status and (if that status is
     // OK) a vector of tensors, representing an element of the input dataset.
     struct BufferElement {
+      BufferElement() : uid(tensorflow::EnvTime::NowNanos()) {}
+
       // The producer sets `status` if getting the input element fails.
       Status status;
       // The buffered data element.
       std::vector<Tensor> value;
       int64 created_us;
-      int64 id;
+      const uint64 uid;
     };
 
     int64 buffer_limit() const TF_EXCLUSIVE_LOCKS_REQUIRED(*mu_) {
@@ -354,7 +382,7 @@ class PrefetchDatasetOp::Dataset : public DatasetBase {
       // (if we successfully got an element) the output values.
       Status s = buffer_.front().status;
       if (s.ok()) {
-        int64 buffer_element_id = buffer_.front().id;
+        int64 buffer_element_id = buffer_.front().uid;
         profiler::TraceMe traceme(
             [&] {
               return profiler::TraceMeEncode(
@@ -376,6 +404,11 @@ class PrefetchDatasetOp::Dataset : public DatasetBase {
         }
         *out_tensors = std::move(buffer_.front().value);
         RecordBufferDequeue(ctx, *out_tensors);
+      } else {
+        // If status not ok, we still record the dequeue event to make sure each
+        // enqueue event is paired with a dequeue event even in the presence of
+        // errors.
+        RecordBufferDequeue(ctx, buffer_.front().value);
       }
       if (legacy_autotune_) {
         auto_tuner_.RecordConsumption(buffer_.size());
@@ -448,8 +481,8 @@ class PrefetchDatasetOp::Dataset : public DatasetBase {
         {
           profiler::TraceMe traceme(
               [&] {
-                return profiler::TraceMeEncode("PrefetchProduce",
-                                               {{"element_id", num_produced}});
+                return profiler::TraceMeEncode(
+                    "PrefetchProduce", {{"element_id", buffer_element.uid}});
               },
               profiler::kInfo);
           buffer_element.status = input_impl_->GetNext(
@@ -467,7 +500,6 @@ class PrefetchDatasetOp::Dataset : public DatasetBase {
           mutex_lock l(*mu_);
           RecordBufferEnqueue(ctx.get(), buffer_element.value);
           buffer_element.created_us = EnvTime::NowMicros();
-          buffer_element.id = num_produced;
           buffer_.push_back(std::move(buffer_element));
           cond_var_->notify_all();
         }

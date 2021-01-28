@@ -15,13 +15,14 @@ limitations under the License.
 
 #include "mlir-hlo/Dialect/mhlo/IR/chlo_ops.h"
 
+#include "llvm/ADT/APFloat.h"
 #include "mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
 #include "mlir-hlo/utils/broadcast_utils.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/IR/StandardTypes.h"
 #include "mlir/IR/TypeUtilities.h"
 
 namespace mlir {
@@ -30,6 +31,25 @@ namespace chlo {
 template <typename T>
 static LogicalResult Verify(T op) {
   return success();
+}
+
+Value getConstantLikeMaxFiniteValue(OpBuilder& b, Location loc, Value val) {
+  auto ty = getElementTypeOrSelf(val.getType()).cast<FloatType>();
+  return getConstantLike(
+      b, loc, llvm::APFloat::getLargest(ty.getFloatSemantics()), val);
+}
+
+Value getConstantLikeInfValue(OpBuilder& b, Location loc, Value val,
+                              bool negative) {
+  auto ty = getElementTypeOrSelf(val.getType()).cast<FloatType>();
+  return getConstantLike(
+      b, loc, llvm::APFloat::getInf(ty.getFloatSemantics(), negative), val);
+}
+
+Value getConstantLike(OpBuilder& b, Location loc, const APFloat& constant,
+                      Value val) {
+  Type ty = getElementTypeOrSelf(val.getType());
+  return b.create<ConstantLikeOp>(loc, b.getFloatAttr(ty, constant), val);
 }
 
 //===----------------------------------------------------------------------===//
@@ -190,26 +210,67 @@ LogicalResult BroadcastComplexOp::reifyReturnTypeShapes(
 void BroadcastCompareOp::build(OpBuilder& builder, OperationState& result,
                                Value lhs, Value rhs,
                                DenseIntElementsAttr broadcast_dimensions,
-                               StringAttr comparison_direction) {
+                               StringAttr comparison_direction,
+                               StringAttr compare_type) {
   auto new_type = GetBroadcastType(lhs.getType(), rhs.getType(),
                                    builder.getI1Type(), broadcast_dimensions);
   build(builder, result, new_type, lhs, rhs, broadcast_dimensions,
-        comparison_direction);
+        comparison_direction, compare_type);
 }
 
 LogicalResult BroadcastCompareOp::inferReturnTypeComponents(
     MLIRContext* context, Optional<Location> location, ValueRange operands,
     DictionaryAttr attributes, RegionRange regions,
     SmallVectorImpl<ShapedTypeComponents>& inferedReturnShapes) {
-  Type element_type = IntegerType::get(1, context);
+  Type element_type = IntegerType::get(context, 1);
   return InferBroadcastBinaryOpReturnTypeComponents(context, location, operands,
                                                     attributes, element_type,
                                                     inferedReturnShapes);
 }
+
 LogicalResult BroadcastCompareOp::reifyReturnTypeShapes(
     OpBuilder& builder, SmallVectorImpl<Value>& reifiedReturnShapes) {
   return ReifyBroadcastBinaryOpReturnTypeShapes(builder, getOperation(),
                                                 reifiedReturnShapes);
+}
+
+//===----------------------------------------------------------------------===//
+// IsInfOp
+//===----------------------------------------------------------------------===//
+
+static Type getIsInfLikeReturnType(Value operand) {
+  Builder b(operand.getContext());
+  return mhlo::getSameShapeTensorType(operand.getType().cast<TensorType>(),
+                                      b.getI1Type());
+}
+
+LogicalResult IsInfOp::inferReturnTypes(
+    MLIRContext* ctx, Optional<Location>, ValueRange operands, DictionaryAttr,
+    RegionRange, SmallVectorImpl<Type>& inferredReturnTypes) {
+  inferredReturnTypes.push_back(getIsInfLikeReturnType(operands.front()));
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// IsNegInfOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult IsNegInfOp::inferReturnTypes(
+    MLIRContext* ctx, Optional<Location>, ValueRange operands, DictionaryAttr,
+    RegionRange, SmallVectorImpl<Type>& inferredReturnTypes) {
+  inferredReturnTypes.push_back(getIsInfLikeReturnType(operands.front()));
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// IsPosInfOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult IsPosInfOp::inferReturnTypes(
+    MLIRContext* ctx, Optional<Location>, ValueRange operands, DictionaryAttr,
+    RegionRange, SmallVectorImpl<Type>& inferredReturnTypes) {
+  inferredReturnTypes.push_back(getIsInfLikeReturnType(operands.front()));
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

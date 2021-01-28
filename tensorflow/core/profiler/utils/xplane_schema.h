@@ -103,6 +103,11 @@ enum HostEventType {
   // Batching related.
   kBatchingSessionRun,
   kProcessBatch,
+  kConcatInputTensors,
+  kMergeInputTensors,
+  kScheduleWithoutSplit,
+  kScheduleWithSplit,
+  kASBSQueueSchedule,
   // JAX related.
   kExecuteOnLocalDevices,
   // GPU related.
@@ -141,6 +146,7 @@ enum StatType {
   kRegionType,
   kDataType,
   kTensorShapes,
+  kTensorLayout,
   kKpiName,
   kKpiValue,
   kElementId,
@@ -156,9 +162,15 @@ enum StatType {
   kDeviceId,
   kContextId,
   kCorrelationId,
+  // TODO(b/176137043): These "details" should differentiate between activity
+  // and API event sources.
   kMemcpyDetails,
   kMemallocDetails,
+  kMemFreeDetails,
+  kMemsetDetails,
+  kMemoryResidencyDetails,
   kKernelAnnotation,
+  kNVTXRange,
   kKernelDetails,
   kStream,
   // Stats added when processing traces.
@@ -191,7 +203,15 @@ enum StatType {
   kDevCapMemorySize,
   kDevCapComputeCapMajor,
   kDevCapComputeCapMinor,
-  kLastStatType = kDevCapComputeCapMinor,
+  // Batching related.
+  kBatchSizeAfterPadding,
+  kPaddingAmount,
+  kBatchingInputTaskSize,
+  // GPU occupancy metrics
+  kTheoreticalOccupancyPct,
+  kOccupancyMinGridSize,
+  kOccupancySuggestedBlockSize,
+  kLastStatType = kOccupancySuggestedBlockSize,
 };
 
 inline std::string GpuPlaneName(int32 device_ordinal) {
@@ -208,6 +228,8 @@ inline bool IsHostEventType(HostEventType event_type,
 }
 
 absl::optional<int64> FindHostEventType(absl::string_view event_name);
+
+absl::optional<int64> FindTfOpEventType(absl::string_view event_name);
 
 absl::string_view GetStatTypeStr(StatType stat_type);
 

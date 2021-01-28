@@ -120,23 +120,6 @@ class PriorityTracker {
   }
 };
 
-std::vector<EventTypeSpan> ToNonOverlappedEvents(
-    const std::vector<EventTypeSpan>& overlapped_events) {
-  std::vector<EventBoundary> event_boundaries =
-      GenerateEventBoundaries(overlapped_events);
-  std::vector<EventTypeSpan> result;
-  if (event_boundaries.empty()) return result;
-  result.reserve(event_boundaries.size());
-  PriorityTracker priority_tracker;
-  for (int64 i = 0, end = (event_boundaries.size() - 1); i < end; i++) {
-    EventType highest_priority = priority_tracker.Update(event_boundaries[i]);
-    result.push_back({highest_priority, Timespan::FromEndPoints(
-                                            event_boundaries[i].time_ps,
-                                            event_boundaries[i + 1].time_ps)});
-  }
-  return result;
-}
-
 void CombineStepDetails(const StepDetails& src, StepDetails* dst) {
   dst->AppendMarkers(src.Markers());
   dst->AppendEvents(src.Events());
@@ -162,7 +145,34 @@ EventType ClassifyDeviceCompute(absl::string_view event_name,
   }
 }
 
+constexpr int kNumGenericEventTypes = GenericEventType::kLastGenericEventType -
+                                      GenericEventType::kFirstGenericEventType +
+                                      1;
+
+using GenericEventTypeStrMap =
+    absl::flat_hash_map<GenericEventType, absl::string_view>;
+
+const GenericEventTypeStrMap& GetGenericEventTypeStrMap() {
+  static const auto* generic_event_type_str_map = new GenericEventTypeStrMap({
+      {kDeviceCompute, "Device compute"},
+      {kDeviceToDevice, "Device to device"},
+      {kDeviceCollectives, "Device collective communication"},
+      {kHostCompute, "Host compute"},
+      {kHostPrepare, "Kernel launch"},
+      {kInput, "Input"},
+      {kOutput, "Output"},
+      {kCompile, "Compilation"},
+      {kAllOthers, "All others"},
+  });
+  DCHECK_EQ(generic_event_type_str_map->size(), kNumGenericEventTypes);
+  return *generic_event_type_str_map;
+}
+
 }  // namespace
+
+absl::string_view GetGenericEventTypeStr(GenericEventType event_type) {
+  return GetGenericEventTypeStrMap().at(event_type);
+}
 
 EventType ClassifyGpuEvent(absl::string_view event_name,
                            absl::string_view tensor_shapes) {
@@ -231,42 +241,6 @@ std::string PrintEventType(EventType event_type) {
   }
 }
 
-std::string PrintEventTypeLabel(EventType event_type) {
-  switch (event_type) {
-    case UNKNOWN_TIME:
-      return "Machine idle or unknown events";
-    case HOST_COMPUTE:
-      return "Host compute";
-    case HOST_COMPILE:
-      return "Host compile";
-    case HOST_TO_HOST:
-      return "Host to host";
-    case HOST_TO_DEVICE:
-      return "Host to device";
-    case HOST_PREPARE:
-      return "Host prepare";
-    case DEVICE_COLLECTIVES:
-      return "Device collectives";
-    case HOST_WAIT_INPUT:
-      return "Host wait input";
-    case DEVICE_TO_DEVICE:
-      return "Device to device";
-    case DEVICE_TO_HOST:
-      return "Device to host";
-    case DEVICE_COMPUTE_32:
-      return "Device compute 32-bit";
-    case DEVICE_COMPUTE_16:
-      return "Device compute 16-bit";
-    case DEVICE_WAIT_DEVICE:
-      return "Device wait device";
-    case DEVICE_WAIT_HOST:
-      return "Device wait host";
-    default:
-      DCHECK(false);
-      return "Unknown event type";
-  }
-}
-
 std::string PrintEventTypeSpan(const EventTypeSpan& event_type_span) {
   return absl::StrCat("(", PrintEventType(event_type_span.type), ", ",
                       event_type_span.span.DebugString(), ")");
@@ -313,6 +287,23 @@ void CombineStepEvents(const StepEvents& src, StepEvents* dst) {
     StepDetails* dst_details = &(*dst)[step_id];
     CombineStepDetails(src_details, dst_details);
   }
+}
+
+std::vector<EventTypeSpan> ToNonOverlappedEvents(
+    const std::vector<EventTypeSpan>& overlapped_events) {
+  std::vector<EventBoundary> event_boundaries =
+      GenerateEventBoundaries(overlapped_events);
+  std::vector<EventTypeSpan> result;
+  if (event_boundaries.empty()) return result;
+  result.reserve(event_boundaries.size());
+  PriorityTracker priority_tracker;
+  for (int64 i = 0, end = (event_boundaries.size() - 1); i < end; i++) {
+    EventType highest_priority = priority_tracker.Update(event_boundaries[i]);
+    result.push_back({highest_priority, Timespan::FromEndPoints(
+                                            event_boundaries[i].time_ps,
+                                            event_boundaries[i + 1].time_ps)});
+  }
+  return result;
 }
 
 // Converts from overlapped step-events to non-overlapped step-events.

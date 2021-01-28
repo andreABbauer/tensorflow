@@ -34,7 +34,7 @@ py_library(
         "rmsprop.py",
         "utils.py",
     ],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     deps = [
         ":learning_rate_schedule",
         "//tensorflow/python:control_flow_ops",
@@ -47,6 +47,7 @@ py_library(
         "//tensorflow/python/distribute:central_storage_strategy",
         "//tensorflow/python/distribute:distribute_lib",
         "//tensorflow/python/distribute:parameter_server_strategy",
+        "//tensorflow/python/distribute:parameter_server_strategy_v2",
         "//tensorflow/python/distribute:reduce_util",
         "//tensorflow/python/distribute:values",
         "//tensorflow/python/keras:backend",
@@ -63,7 +64,7 @@ py_library(
     srcs = [
         "learning_rate_schedule.py",
     ],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     deps = [
         "//tensorflow/python:control_flow_ops",
         "//tensorflow/python:framework",
@@ -76,14 +77,14 @@ py_library(
 py_library(
     name = "legacy_learning_rate_decay",
     srcs = ["legacy_learning_rate_decay.py"],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     deps = [
         ":learning_rate_schedule",
         "//tensorflow/python:dtypes",
         "//tensorflow/python:framework_ops",
         "//tensorflow/python:math_ops",
-        "//tensorflow/python:tf_export",
         "//tensorflow/python/eager:context",
+        "//tensorflow/python/util:tf_export",
     ],
 )
 
@@ -92,7 +93,6 @@ cuda_py_test(
     size = "medium",
     srcs = ["adagrad_test.py"],
     shard_count = 4,
-    tfrt_enabled = True,
     deps = [
         ":optimizer_v2",
         "//tensorflow/python:client_testlib",
@@ -113,7 +113,10 @@ cuda_py_test(
     size = "medium",
     srcs = ["adam_test.py"],
     shard_count = 4,
-    tags = ["no_rocm"],
+    tags = [
+        "no_rocm",
+        "no_windows",  # TODO(b/171384138)
+    ],
     deps = [
         ":optimizer_v2",
         "//tensorflow/python:client_testlib",
@@ -155,7 +158,6 @@ cuda_py_test(
     size = "medium",
     srcs = ["adadelta_test.py"],
     shard_count = 4,
-    tags = ["no_rocm"],
     # TODO(b/168527439): invalid resource variable reference on GPU for TFRT.
     deps = [
         ":optimizer_v2",
@@ -177,7 +179,6 @@ cuda_py_test(
     size = "medium",
     srcs = ["ftrl_test.py"],
     shard_count = 4,
-    tfrt_enabled = True,
     deps = [
         ":optimizer_v2",
         "//tensorflow/python:client_testlib",
@@ -217,7 +218,6 @@ cuda_py_test(
     size = "medium",
     srcs = ["nadam_test.py"],
     shard_count = 4,
-    tfrt_enabled = True,
     deps = [
         ":optimizer_v2",
         "//tensorflow/python:client_testlib",
@@ -238,7 +238,6 @@ cuda_py_test(
     srcs = ["optimizer_v2_test.py"],
     shard_count = 8,
     tags = [
-        "no_rocm",
         "no_windows",
     ],
     deps = [
@@ -264,7 +263,6 @@ cuda_py_test(
     size = "medium",
     srcs = ["learning_rate_schedule_test.py"],
     shard_count = 4,
-    tfrt_enabled = True,
     deps = [
         ":optimizer_v2",
         "//tensorflow/python:client_testlib",
@@ -279,7 +277,6 @@ cuda_py_test(
     name = "legacy_learning_rate_decay_test",
     size = "medium",
     srcs = ["legacy_learning_rate_decay_test.py"],
-    tfrt_enabled = True,
     deps = [
         ":legacy_learning_rate_decay",
         "//tensorflow/python:framework_test_lib",
@@ -288,6 +285,7 @@ cuda_py_test(
         "//tensorflow/python:training_lib",
         "//tensorflow/python:variables",
         "//tensorflow/python/eager:context",
+        "//tensorflow/python/keras",
         "//tensorflow/python/keras:combinations",
     ],
 )
@@ -297,7 +295,9 @@ cuda_py_test(
     size = "medium",
     srcs = ["rmsprop_test.py"],
     shard_count = 2,
-    tags = ["no_rocm"],
+    xla_tags = [
+        "no_cuda_asan",  # times out
+    ],
     # TODO(b/168527439): invalid resource variable reference on GPU for TFRT.
     deps = [
         ":optimizer_v2",
